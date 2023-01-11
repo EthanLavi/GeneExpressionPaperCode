@@ -1,0 +1,70 @@
+Load the csv
+```{r}
+set.seed(6)
+
+# Read in csv of just ovarian cancer
+df = read.csv("csv/data.csv")
+
+# Shuffle the rows of the data-set to remove patterns
+b_begin = nrow(df[df$Cancer.Type == "Ovarian",])
+b_end = nrow(df)
+random_order = sample(b_begin)
+# Keep the breast patients after the 374 ovarian patients
+breast_order = (b_begin+1) : b_end
+df = df[c(random_order, breast_order),]
+
+# Convert to bool labels instead of strings
+colnames(df)[colnames(df) == 'Days.Survived..7300.Max.'] <- 'SurvivalDays'
+colnames(df)[colnames(df) == 'Status..Alive.'] <- 'SURVIVAL'
+
+# Drop unused columns
+df$Patient = NULL
+df$SurvivalDays = NULL
+df$ICD.10.Code = NULL
+df$Age.Days = NULL
+df$Race = NULL
+df$Tumor.Residual.Disease = NULL
+df$Lymphatic.Invasion = NULL
+df$Total.Dose = NULL
+df$Total.Dose.Units = NULL
+df$Number.Cycles = NULL
+df$Start.Date = NULL
+df$End.Date = NULL
+df$Therapy.Type = NULL
+df$Drug = NULL
+df$Regimen.Indication = NULL
+```
+
+Normalize the columns
+```{r}
+for(col in colnames(df)){
+  # Skip non numeric columns
+  s = c("SURVIVAL", "RECURRENCE", "PROGRESSION", "Figo.Stage", "Age.Years", "Neoplasm.Histologic.Grade", "Cancer.Type")
+  if (is.element(col, s)){
+    next
+  }
+  
+  # Compute Z-Score for normalization
+  avg = mean(df[,col])
+  std = sd(df[,col])
+  df[,col] = (df[,col] - avg) / std
+}
+```
+
+Transform the non-gene variables
+```{r}
+df$Figo.Stage = factor(df$Figo.Stage)
+levels(df$Figo.Stage) = 1:9
+
+df$Neoplasm.Histologic.Grade = factor(df$Neoplasm.Histologic.Grade, levels=c("GX", "GB", "G1", "G2", "G3", "G4"))
+levels(df$Neoplasm.Histologic.Grade) = 1:6
+
+m = mean(df$Age.Years, na.rm=TRUE)
+s = sd(df$Age.Years, na.rm=TRUE)
+df$Age.Years = (df$Age.Years - m) / s
+```
+
+Save Datasets for use in other analysis
+```{r}
+write.csv(df, file="csv/SurvivalNormalBoth.csv")
+```

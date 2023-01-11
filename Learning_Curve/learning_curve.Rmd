@@ -1,0 +1,100 @@
+Load the csv
+```{r}
+library(caret)
+
+set.seed(6)
+
+# Read in csv of just ovarian cancer
+df = read.csv("../csv/data.csv")
+df = df[df$Cancer.Type == "Ovarian",]
+
+# Shuffle the rows of the data-set to remove patterns
+random_order = sample(nrow(df))
+df = df[random_order,]
+
+# Convert to bool labels instead of strings
+colnames(df)[colnames(df) == 'Days.Survived..7300.Max.'] <- 'SurvivalDays'
+colnames(df)[colnames(df) == 'Status..Alive.'] <- 'SURVIVAL'
+
+# Drop unused columns
+df$Patient = NULL
+df$Figo.Stage = NULL
+df$Age.Years = NULL
+df$ICD.10.Code = NULL
+df$Age.Days = NULL
+df$Race = NULL
+df$Neoplasm.Histologic.Grade = NULL
+df$Tumor.Residual.Disease = NULL
+df$Lymphatic.Invasion = NULL
+df$Total.Dose = NULL
+df$Total.Dose.Units = NULL
+df$Number.Cycles = NULL
+df$Start.Date = NULL
+df$End.Date = NULL
+df$Therapy.Type = NULL
+df$Drug = NULL
+df$Regimen.Indication = NULL
+df$Cancer.Type = NULL
+
+# Fix original df Convert survival to bool
+df$SURVIVAL = as.integer(df$SURVIVAL == "TRUE")
+df$PROGRESSION = NULL
+df$RECURRENCE = NULL
+
+# Make train and test dataframe
+cut_amount = seq(floor(nrow(df) * 0.7))
+train_df = df[cut_amount,]
+test_df = df[-cut_amount,]
+```
+
+Normalize the columns
+```{r}
+for(col in colnames(df)){
+  # Skip non numeric columns
+  if(col == "SURVIVAL" || col == "RECURRENCE" || col == "PROGRESSION" || col == "SurvivalDays"){
+    next
+  }
+  # Compute Z-Score for normalization
+  avg = mean(df[,col])
+  std = sd(df[,col])
+  df[,col] = (df[,col] - avg) / std
+}
+```
+
+Function for accuracy calculations
+```{r}
+evalr <- function(model, test, actual, type){
+  preds = predict(model, test, type=type)
+  if (type == "response"){
+    preds = preds > 0.5
+  } else if (type == "class") {
+    preds = preds == 1
+  }
+  lister = preds == actual
+  acc = sum(lister) / length(lister)
+  mtrx = confusionMatrix(factor(preds, levels=c(TRUE, FALSE)), factor(actual == 1, levels=c(TRUE, FALSE)), mode = "everything")$byClass
+  return (c(acc, mtrx[['Balanced Accuracy']]))
+}
+```
+
+Create logistic regression model for the different predictors 
+```{r}
+output = data.frame(output = data.frame(matrix(ncol = 3, nrow = 0)))
+colnames(output) = c("X", "Train Acc", "Test Acc")
+
+# Iterate through x values
+test = test_df
+for (x in seq(6, nrow(train_df), floor(nrow(train_df) / 25))){
+  train = train_df[seq(x),]
+  
+  log_model_survival = glm(SURVIVAL~TP53BP1+CTBP1+APTX+RAD52+PMS1, data=train)
+  pair_acc_train = evalr(log_model_survival, train, train$SURVIVAL, "response")
+  pair_acc_test = evalr(log_model_survival, test, test$SURVIVAL, "response")
+  output[nrow(output) + 1,] = c(x, pair_acc_train[2], pair_acc_test[2])
+}
+```
+
+Save results for use in graphing
+```{r}
+write.csv(output, file="../csv/learning_curve_log.csv")
+```

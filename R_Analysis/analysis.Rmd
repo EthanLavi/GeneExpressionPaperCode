@@ -1,0 +1,423 @@
+Load Libraries
+```{r}
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(e1071)
+```
+
+Load the csv
+```{r}
+set.seed(6)
+
+# Read in csv of just ovarian cancer
+df = read.csv("../csv/data.csv")
+df = df[df$Cancer.Type == "Ovarian",]
+
+# Shuffle the rows of the data-set to remove patterns
+random_order = sample(nrow(df))
+df = df[random_order,]
+
+# Convert to bool labels instead of strings
+colnames(df)[colnames(df) == 'Days.Survived..7300.Max.'] <- 'SurvivalDays'
+colnames(df)[colnames(df) == 'Status..Alive.'] <- 'SURVIVAL'
+
+# Drop unused columns
+df$Patient = NULL
+df$Figo.Stage = NULL
+df$Age.Years = NULL
+df$ICD.10.Code = NULL
+df$Age.Days = NULL
+df$Race = NULL
+df$Neoplasm.Histologic.Grade = NULL
+df$Tumor.Residual.Disease = NULL
+df$Lymphatic.Invasion = NULL
+df$Total.Dose = NULL
+df$Total.Dose.Units = NULL
+df$Number.Cycles = NULL
+df$Start.Date = NULL
+df$End.Date = NULL
+df$Therapy.Type = NULL
+df$Drug = NULL
+df$Regimen.Indication = NULL
+df$Cancer.Type = NULL
+```
+
+T-Test
+```{r}
+calculate = function(x1, x2){
+  for(col in colnames(df)){
+    # Skip non numeric columns
+    if(col == "SURVIVAL" || col == "RECURRENCE" || col == "PROGRESSION" || col == "SurvivalDays"){
+      next
+    }
+    # Compute Z-Score for normalization
+    u1 = mean(x1[,col])
+    u2 = mean(x2[,col])
+    sigma1 = sd(x1[,col])
+    sigma2 = sd(x2[,col])
+    n1 = length(x1[,col])
+    n2 = length(x2[,col])
+    t = (u1 - u2) / sqrt((sigma1^2 / n1) + (sigma2^2 / n2))
+    
+    p = pt(t, n1 + n2 - 2)
+    pos_cor = FALSE
+    if (t > 0){
+      p = 1 - p
+      pos_cor = TRUE
+    }
+    print(paste(col, t, p, pos_cor))
+  }
+}
+
+s1 = df[df$SURVIVAL == "TRUE",]
+s2 = df[df$SURVIVAL == "FALSE",]
+
+p1 = df[df$PROGRESSION == "TRUE",]
+p2 = df[df$PROGRESSION == "FALSE",]
+
+r1 = df[df$RECURRENCE == "TRUE",]
+r2 = df[df$RECURRENCE == "FALSE",]
+
+print("SURVIVAL")
+calculate(s1, s2)
+print("PROGRESSION")
+calculate(p1, p2)
+print("RECURRENCE")
+calculate(r1, r2)
+```
+
+Normalize the columns
+```{r}
+for(col in colnames(df)){
+  # Skip non numeric columns
+  if(col == "SURVIVAL" || col == "RECURRENCE" || col == "PROGRESSION" || col == "SurvivalDays"){
+    next
+  }
+  # Compute Z-Score for normalization
+  avg = mean(df[,col])
+  std = sd(df[,col])
+  df[,col] = (df[,col] - avg) / std
+}
+```
+
+Making data-sets
+```{r}
+# Make df for progression
+df_prog = df[df$PROGRESSION != "UNKNOWN",]
+df_prog$PROGRESSION = as.integer(df_prog$PROGRESSION == "TRUE")
+df_prog$SURVIVAL = NULL
+df_prog$SurvivalDays = NULL
+df_prog$RECURRENCE = NULL
+
+# Make df for recurrence
+df_rec = df[df$RECURRENCE != "UNKNOWN",]
+df_rec$RECURRENCE = as.integer(df_rec$RECURRENCE == "TRUE")
+df_rec$SURVIVAL = NULL
+df_rec$SurvivalDays = NULL
+df_rec$PROGRESSION = NULL
+
+# Fix original df Convert survival to bool
+df$SURVIVAL = as.integer(df$SURVIVAL == "TRUE")
+df$PROGRESSION = NULL
+df$RECURRENCE = NULL
+
+# Make a function for creating cross-validation numbers
+cross_val <- function(n, k=10){
+  size_set = n / k
+  indexes = vector(mode="list", length=k)
+  for (i in seq(0, k-1)){
+    set_nums = list(seq(floor(i*size_set)+1, floor((i+1)*size_set)))
+    indexes[i+1] = set_nums
+  }
+  return(indexes)
+}
+
+# Make an array of row numbers to make training and testing sets for 10-fold cross-validation
+survival_index = cross_val(nrow(df))
+prog_index = cross_val(nrow(df_prog))
+rec_index = cross_val(nrow(df_rec))
+```
+
+Function for accuracy calculations
+```{r}
+evalr <- function(model, test, actual, type){
+  preds = predict(model, test, type=type)
+  if (type == "response"){
+    preds = preds > 0.5
+  } else if (type == "class") {
+    preds = preds == 1
+  }
+  lister = preds == actual
+  acc = sum(lister) / length(lister)
+  mtrx = confusionMatrix(factor(preds, levels=c(TRUE, FALSE)), factor(actual == 1, levels=c(TRUE, FALSE)), mode = "everything")$byClass
+  return (c(acc, mtrx[['Balanced Accuracy']]))
+}
+```
+
+Create linear regression model
+```{r}
+# Get coefficients for model on all data points
+df_clean = na.omit(df)
+
+# Remove column from data frame because no longer useful
+df$SurvivalDays = NULL
+
+lin_model_survival = lm(SurvivalDays~.-SURVIVAL, data=df_clean)
+summary(lin_model_survival)
+
+# Get the survival in days for deceased
+df_clean = df_clean[df_clean$SurvivalDays != 7300,]
+rownames(df_clean) = 1:nrow(df_clean)
+reg_index = cross_val(nrow(df_clean))
+
+sum_me = 0
+sum_me_control = 0
+guessing_mean = mean(df_clean$SurvivalDays)
+for (t_set in reg_index){
+  train = df_clean[-t_set,]
+  test = df_clean[t_set,]
+  
+  lin_model_survival = lm(SurvivalDays~.-SURVIVAL, data=train)
+  
+  preds_lin = predict(lin_model_survival, test, type="response")
+  actual_lin = test$SurvivalDays
+  mean_error = mean(abs(actual_lin - preds_lin))
+  control_error = mean(abs(actual_lin - guessing_mean))
+  sum_me = sum_me + mean_error
+  sum_me_control = sum_me_control + control_error
+}
+print(paste("Control Mean Error (predicting mean)", sum_me_control / 10))
+print(paste("Average Mean Error for Linear Regression", sum_me / 10))
+```
+
+Get coefficients while training on everything
+```{r}
+log_model_survival = glm(SURVIVAL~., data=df)
+log_model_progression = glm(PROGRESSION~., data=df_prog)
+log_model_recurrence = glm(RECURRENCE~., data=df_rec)
+
+summary(log_model_survival)
+summary(log_model_progression)
+summary(log_model_recurrence)
+```
+
+Create logistic regression model for the different predictors 
+```{r}
+# Iterate through validation sets
+sum_surv_acc = 0
+sum_surv_f = 0
+for (t_set in survival_index){
+  train = df[-t_set,]
+  test = df[t_set,]
+  
+  log_model_survival = glm(SURVIVAL~TP53BP1+CTBP1+APTX+RAD52+PMS1, data=train)
+  pair_acc_f = evalr(log_model_survival, test, test$SURVIVAL, "response")
+  sum_surv_acc = sum_surv_acc + pair_acc_f[1]
+  sum_surv_f = sum_surv_f + pair_acc_f[2]
+}
+print(paste("Logistic Regression: Avg Accuracy Survival", sum_surv_acc / 10))
+print(paste("Logistic Regression: Avg Balanced Accuracy Survival", sum_surv_f / 10))
+ 
+ # Iterate through validation sets
+sum_prog_acc = 0
+sum_prog_f = 0
+for (t_set in prog_index){
+  train = df_prog[-t_set,]
+  test = df_prog[t_set,]
+  
+  log_model_progression = glm(PROGRESSION~DCLRE1C+BRCA1+BRCA2+PAXX, data=train)
+  pair_acc_f = evalr(log_model_progression, test, test$PROGRESSION, "response")
+  sum_prog_acc = sum_prog_acc + pair_acc_f[1]
+  sum_prog_f = sum_prog_f + pair_acc_f[2]
+}
+print(paste("Logistic Regression: Avg Accuracy Progression", sum_prog_acc / 10))
+print(paste("Logistic Regression: Avg Balanced Accuracy Progression", sum_prog_f / 10))
+
+ # Iterate through validation sets
+sum_rec_acc = 0
+sum_rec_f = 0
+for (t_set in rec_index){
+  train = df_rec[-t_set,]
+  test = df_rec[t_set,]
+  
+  # To use all the genes, replace the + etc with a single .
+  log_model_recurrence = glm(RECURRENCE~BRCA2+LIG1+NBN+RAD52+TP53+H2AX+MLH1+MLH3, data=train)
+  pair_acc_f = evalr(log_model_recurrence, test, test$RECURRENCE, "response")
+  sum_rec_acc = sum_rec_acc + pair_acc_f[1]
+  sum_rec_f = sum_rec_f + pair_acc_f[2]
+}
+print(paste("Logistic Regression: Avg Accuracy Recurrence", sum_rec_acc / 10))
+print(paste("Logistic Regression: Avg Balanced Accuracy Recurrence", sum_rec_f / 10))
+```
+
+Decision Tree
+```{r}
+sum_surv_acc = 0
+sum_surv_f = 0
+for (t_set in survival_index){
+  train = df[-t_set,]
+  test = df[t_set,]
+  
+  # Performs better using all genes, rather than the best from Linear Regression
+  dtree_survival = rpart(SURVIVAL~., data=train, method='class')
+  pair_acc_f = evalr(dtree_survival, test, test$SURVIVAL, 'class')
+  sum_surv_acc = sum_surv_acc + pair_acc_f[1]
+  sum_surv_f = sum_surv_f + pair_acc_f[2]
+}
+print(paste("Decision Tree: Avg Accuracy Survival", sum_surv_acc / 10))
+print(paste("Decision Tree: Avg Balanced Accuracy Survival", sum_surv_f / 10))
+
+sum_surv_acc = 0
+sum_surv_f = 0
+for (t_set in prog_index){
+  train = df_prog[-t_set,]
+  test = df_prog[t_set,]
+  
+  dtree_progression = rpart(PROGRESSION~DCLRE1C+BRCA1+BRCA2+PAXX, data=train, method='class')
+  pair_acc_f = evalr(dtree_progression, test, test$PROGRESSION, 'class')
+  sum_surv_acc = sum_surv_acc + pair_acc_f[1]
+  sum_surv_f = sum_surv_f + pair_acc_f[2]
+}
+print(paste("Decision Tree: Avg Accuracy Progression", sum_surv_acc / 10))
+print(paste("Decision Tree: Avg Balanced Accuracy Progression", sum_surv_f / 10))
+
+sum_surv_acc = 0
+sum_surv_f = 0
+for (t_set in rec_index){
+  train = df_rec[-t_set,]
+  test = df_rec[t_set,]
+  
+  # Performs better using all genes
+  dtree_recurrence = rpart(RECURRENCE~., data=train, method='class')
+  pair_acc_f = evalr(dtree_recurrence, test, test$RECURRENCE, 'class')
+  sum_surv_acc = sum_surv_acc + pair_acc_f[1]
+  sum_surv_f = sum_surv_f + pair_acc_f[2]
+}
+print(paste("Decision Tree: Avg Accuracy Survival", sum_surv_acc / 10))
+print(paste("Decision Tree: Avg Balanced Accuracy Survival", sum_surv_f / 10))
+```
+
+Tree Visualization
+```{r}
+tree_model_survival = rpart(SURVIVAL~., data=df, method='class')
+tree_model_progression = rpart(PROGRESSION~DCLRE1C+BRCA1+BRCA2+PAXX, data=df_prog, method='class')
+tree_model_recurrence = rpart(RECURRENCE~., data=df_rec, method='class')
+
+rpart.plot(tree_model_survival)
+rpart.plot(tree_model_progression)
+rpart.plot(tree_model_recurrence)
+```
+
+Naive Bayes
+```{r}
+# Iterate through validation sets
+sum_surv_acc = 0
+sum_surv_f = 0
+for (t_set in survival_index){
+  train = df[-t_set,]
+  test = df[t_set,]
+  
+  # Best using all genes
+  naive_bayes_survival = naiveBayes(SURVIVAL~., data=train, laplace=0)
+  pair_acc_f = evalr(naive_bayes_survival, test, test$SURVIVAL, "class")
+  sum_surv_acc = sum_surv_acc + pair_acc_f[1]
+  sum_surv_f = sum_surv_f + pair_acc_f[2]
+}
+print(paste("NaiveBayes: Avg Accuracy Survival", sum_surv_acc / 10))
+print(paste("NaiveBayes: Avg Balanced Accuracy Survival", sum_surv_f / 10))
+ 
+ # Iterate through validation sets
+sum_prog_acc = 0
+sum_prog_f = 0
+for (t_set in prog_index){
+  train = df_prog[-t_set,]
+  test = df_prog[t_set,]
+  
+  naive_bayes_progression = naiveBayes(PROGRESSION~DCLRE1C+BRCA1+BRCA2+PAXX, data=train, laplace=0)
+  pair_acc_f = evalr(naive_bayes_progression, test, test$PROGRESSION, "class")
+  sum_prog_acc = sum_prog_acc + pair_acc_f[1]
+  sum_prog_f = sum_prog_f + pair_acc_f[2]
+}
+print(paste("NaiveBayes: Avg Accuracy Progression", sum_prog_acc / 10))
+print(paste("NaiveBayes: Avg Balanced Accuracy Progression", sum_prog_f / 10))
+
+ # Iterate through validation sets
+sum_rec_acc = 0
+sum_rec_f = 0
+for (t_set in rec_index){
+  train = df_rec[-t_set,]
+  test = df_rec[t_set,]
+  
+  naive_bayes_recurrence = naiveBayes(RECURRENCE~BRCA2+LIG1+NBN+RAD52+TP53+H2AX+MLH1+MLH3, data=train, laplace=0)
+  pair_acc_f = evalr(naive_bayes_recurrence, test, test$RECURRENCE, "class")
+  sum_rec_acc = sum_rec_acc + pair_acc_f[1]
+  sum_rec_f = sum_rec_f + pair_acc_f[2]
+}
+print(paste("NaiveBayes: Avg Accuracy Recurrence", sum_rec_acc / 10))
+print(paste("NaiveBayes: Avg Balanced Accuracy Recurrence", sum_rec_f / 10))
+```
+
+SVM
+```{r}
+# Survival
+for(kern in c("linear", "radial", "sigmoid", "polynomial")){
+  # Iterate through validation sets
+  sum_surv_acc = 0
+  sum_surv_f = 0
+  for (t_set in survival_index){
+    train = df[-t_set,]
+    test = df[t_set,]
+    
+    svm_model <- svm(formula=SURVIVAL~TP53BP1+CTBP1+APTX+RAD52+PMS1, kernel=kern, data=train, type="C-classification")
+    pair_acc_f = evalr(svm_model, test, test$SURVIVAL, "class")
+    sum_surv_acc = sum_surv_acc + pair_acc_f[1]
+    sum_surv_f = sum_surv_f + pair_acc_f[2]
+  }
+  print(paste("SVM: Avg Accuracy Survival", kern, sum_surv_acc / 10))
+  print(paste("SVM: Avg Balanced Accuracy Survival", kern, sum_surv_f / 10))
+}
+
+# Progression
+for(kern in c("linear", "radial", "sigmoid", "polynomial")){
+  # Iterate through validation sets
+  sum_surv_acc = 0
+  sum_surv_f = 0
+  for (t_set in prog_index){
+    train = df_prog[-t_set,]
+    test = df_prog[t_set,]
+    
+    svm_model <- svm(formula=PROGRESSION~DCLRE1C+BRCA1+BRCA2+PAXX, kernel=kern, data=train, type="C-classification")
+    pair_acc_f = evalr(svm_model, test, test$PROGRESSION, "class")
+    sum_surv_acc = sum_surv_acc + pair_acc_f[1]
+    sum_surv_f = sum_surv_f + pair_acc_f[2]
+  }
+  print(paste("SVM: Avg Accuracy Progression", kern, sum_surv_acc / 10))
+  print(paste("SVM: Avg Balanced Accuracy Progression", kern, sum_surv_f / 10))
+}
+
+# Recurrence
+for(kern in c("linear", "radial", "sigmoid", "polynomial")){
+  # Iterate through validation sets
+  sum_surv_acc = 0
+  sum_surv_f = 0
+  for (t_set in rec_index){
+    train = df_rec[-t_set,]
+    test = df_rec[t_set,]
+    
+    svm_model <- svm(formula=RECURRENCE~BRCA2+LIG1+NBN+RAD52+TP53+H2AX+MLH1+MLH3, kernel=kern, data=train, type="C-classification")
+    pair_acc_f = evalr(svm_model, test, test$RECURRENCE, "class")
+    sum_surv_acc = sum_surv_acc + pair_acc_f[1]
+    sum_surv_f = sum_surv_f + pair_acc_f[2]
+  }
+  print(paste("SVM: Avg Accuracy Recurrence", kern, sum_surv_acc / 10))
+  print(paste("SVM: Avg Balanced Accuracy Recurrence", kern, sum_surv_f / 10))
+}
+```
+
+Save Datasets for use in other analysis
+```{r}
+write.csv(df, file="csv/SurvivalNormal.csv")
+write.csv(df_prog, file="csv/ProgressionNormal.csv")
+write.csv(df_rec, file="csv/RecurrenceNormal.csv")
+```
