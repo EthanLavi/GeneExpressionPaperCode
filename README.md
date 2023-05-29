@@ -5,6 +5,8 @@
 The dataset was aggregated from many source files from a publicly available database.
 <https://portal.gdc.cancer.gov/>
 
+The project ID used was TCGA-OV, which studies specifically Ovarian Serous Cystadenocarcinoma.
+
 ## Project Navigation
 
 * csv
